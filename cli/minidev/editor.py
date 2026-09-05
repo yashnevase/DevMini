@@ -1,0 +1,199 @@
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+from typing import Any
+
+from rich import box
+from rich.panel import Panel
+from rich.table import Table
+
+from .console import NAVY, badge, console, ok, warn
+from .manifest import FileTouch, Manifest, PackageTouch
+from .system import command_status, home_dir, run_command
+
+VSCODE_ACP_EXTENSION = "formulahendry.acp-client"
+ZED_AGENT_CONFIG = ".config/zed/agents/minidev.json"
+OPENCODE_CONFIG = ".config/opencode/opencode.json"
+OPENCODE_SCHEMA = "https://opencode.ai/config.json"
+
+MINIDEV_PERMISSION = {
+    "*": "ask",
+    "bash": {
+        "*": "ask",
+        "pwd": "allow",
+        "ls*": "allow",
+        "cat *": "allow",
+        "sed *": "allow",
+        "head *": "allow",
+        "tail *": "allow",
+        "wc *": "allow",
+        "rg *": "allow",
+        "grep *": "allow",
+        "fd *": "allow",
+        "find *": "allow",
+        "git status*": "allow",
+        "git diff*": "allow",
+        "git log*": "allow",
+        "git show*": "allow",
+        "git branch*": "allow",
+        "git rev-parse*": "allow",
+        "pytest*": "allow",
+        "python -m pytest*": "allow",
+        "python3 -m pytest*": "allow",
+        "npm test*": "allow",
+        "npm run test*": "allow",
+        "pnpm test*": "allow",
+        "pnpm run test*": "allow",
+        "yarn test*": "allow",
+        "cargo test*": "allow",
+        "go test*": "allow",
+        "git commit*": "ask",
+        "git tag*": "ask",
+        "git push*": "ask",
+        "npm install*": "ask",
+        "pnpm install*": "ask",
+        "yarn add*": "ask",
+        "pip install*": "ask",
+        "python -m pip install*": "ask",
+        "python3 -m pip install*": "ask",
+        "brew install*": "ask",
+        "brew uninstall*": "ask",
+        "rm *": "ask",
+        "rmdir *": "ask",
+        "unlink *": "ask",
+        "trash *": "ask",
+    },
+    "edit": "ask",
+    "webfetch": "allow",
+}
+
+
+def configure_editor_and_opencode(manifest: Manifest, table: Table, dry_run: bool = False) -> None:
+    write_opencode_config(manifest, table, dry_run=dry_run)
+    configure_editor(manifest, table, dry_run=dry_run)
+
+
+def configure_editor(manifest: Manifest, table: Table, dry_run: bool = False) -> str:
+    code = command_status("code", ["--version"])
+    if code.working:
+        if vscode_extension_installed():
+            manifest.record_package(PackageTouch(VSCODE_ACP_EXTENSION, "vscode", "present"))
+            table.add_row(ok("VS Code ACP extension"), badge("PRESENT"))
+        else:
+            run_command(["code", "--install-extension", VSCODE_ACP_EXTENSION], dry_run=dry_run)
+            manifest.record_package(PackageTouch(VSCODE_ACP_EXTENSION, "vscode", "install"))
+            table.add_row(ok("VS Code ACP extension"), badge("DRY RUN" if dry_run else "OK", "mini.warn" if dry_run else "mini.ok"))
+        return "vscode"
+
+    zed = command_status("zed", ["--version"])
+    if zed.working:
+        write_zed_agent_config(manifest, dry_run=dry_run)
+        table.add_row(ok("Zed agent config"), badge("DRY RUN" if dry_run else "OK", "mini.warn" if dry_run else "mini.ok"))
+        return "zed"
+
+    table.add_row(warn("Editor integration"), badge("MANUAL", "mini.warn"))
+    console.print(manual_editor_panel())
+    return "manual"
+
+
+def write_zed_agent_config(manifest: Manifest, dry_run: bool = False) -> Path:
+    path = home_dir() / ZED_AGENT_CONFIG
+    existed = path.exists()
+    content = {
+        "minidev": {
+            "managed": True,
+            "purpose": "Zed ACP agent config for OpenCode",
+        },
+        "agent_servers": {
+            "MiniDev": {
+                "type": "custom",
+                "command": "opencode",
+                "args": ["acp"],
+            }
+        }
+    }
+    if not dry_run:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(content, indent=2) + "\n")
+    manifest.record_file(FileTouch(str(path), "Zed ACP agent config for MiniDev", "overwrite" if existed else "create"))
+    return path
+
+
+def write_opencode_config(manifest: Manifest, table: Table, dry_run: bool = False) -> Path:
+    path = opencode_config_path()
+    existed = path.exists()
+    config = load_json_object(path)
+    config["$schema"] = config.get("$schema") or OPENCODE_SCHEMA
+    config["permission"] = merge_permissions(config.get("permission"), MINIDEV_PERMISSION)
+    config["minidev"] = {
+        **(config.get("minidev") if isinstance(config.get("minidev"), dict) else {}),
+        "permission_policy": "generated",
+        "runtime_boundary": "OpenCode handles permissions; MiniDev only writes config.",
+    }
+
+    if not dry_run:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(config, indent=2) + "\n")
+    manifest.record_file(FileTouch(str(path), "OpenCode permission policy generated by MiniDev", "overwrite" if existed else "create"))
+    table.add_row(ok("OpenCode permissions"), badge("DRY RUN" if dry_run else "OK", "mini.warn" if dry_run else "mini.ok"))
+    return path
+
+
+def opencode_config_path() -> Path:
+    return home_dir() / OPENCODE_CONFIG
+
+
+def opencode_config_present() -> bool:
+    path = opencode_config_path()
+    config = load_json_object(path)
+    return path.exists() and config.get("permission") is not None
+
+
+def vscode_extension_installed() -> bool:
+    code = command_status("code", ["--version"])
+    if not code.working:
+        return False
+    try:
+        proc = subprocess.run(["code", "--list-extensions"], check=False, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    extensions = {line.strip().lower() for line in proc.stdout.splitlines()}
+    return VSCODE_ACP_EXTENSION.lower() in extensions
+
+
+def zed_agent_config_present() -> bool:
+    return (home_dir() / ZED_AGENT_CONFIG).exists()
+
+
+def load_json_object(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        loaded = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def merge_permissions(existing: object, desired: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(existing, dict):
+        existing = {}
+    merged = dict(existing)
+    for key, value in desired.items():
+        old_value = merged.get(key)
+        if isinstance(value, dict) and isinstance(old_value, dict):
+            merged[key] = {**old_value, **value}
+        else:
+            merged[key] = value
+    return merged
+
+
+def manual_editor_panel() -> Panel:
+    body = (
+        "[mini.yellow]Manual editor setup[/]\n"
+        "VS Code: install the ACP Client extension, then connect it to `opencode acp`.\n"
+        "Zed: add an External Agent named MiniDev with command `opencode` and args `[\"acp\"]`."
+    )
+    return Panel(body, border_style="mini.box", style=f"on {NAVY}", box=box.ROUNDED, padding=(1, 2))
