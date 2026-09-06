@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from dataclasses import dataclass
@@ -9,9 +10,13 @@ from rich import box
 from rich.panel import Panel
 
 from .console import NAVY, badge, console, ok, status_table, title_panel, warn
-from .editor import opencode_config_present, vscode_extension_installed, zed_agent_config_present
+from .editor import configure_editor_and_opencode, opencode_config_present, vscode_extension_installed, zed_agent_config_present
 from .install import ensure_ollama_ready, model_present, pull_model, run_install
 from .manifest import Manifest
+from .model_capability import check_structured_tool_calls
+from .model_catalog import profile_models
+from .system import detect_system
+from .share import share_is_running, share_state_path
 from .state import config_path, load_config, manifest_path
 from .system import command_status
 
@@ -68,9 +73,10 @@ def run_status() -> None:
         badge(editor.detail, "mini.ok" if editor.ok else "mini.warn"),
     )
     lan = lan_status(config)
+    lan_ok = lan in {"ON", "HOST", "REMOTE"}
     table.add_row(
-        ok("LAN") if lan == "ON" else warn("LAN"),
-        badge(lan, "mini.ok" if lan == "ON" else "mini.warn"),
+        ok("LAN") if lan_ok else warn("LAN"),
+        badge(lan, "mini.ok" if lan_ok else "mini.warn"),
     )
 
     console.print(title_panel("minidev --status"))
@@ -78,16 +84,20 @@ def run_status() -> None:
 
 
 def collect_checks(model: str) -> list[CheckResult]:
+    config = load_config()
     ollama = command_status("ollama")
     opencode = command_status("opencode")
     editor = editor_integration_status()
+    tool_calls = check_structured_tool_calls(model) if model_present(model) and ollama_running() else None
 
     return [
         CheckResult("Ollama installed", ollama.working, ollama.version or "MISSING", fixable=True),
         CheckResult("Ollama running", ollama_running(), "RUNNING" if ollama_running() else "OFF", fixable=True),
         CheckResult("Model present", model_present(model), model, fixable=True),
+        CheckResult("Model policy", local_only_policy(config, model), "LOCAL ONLY" if local_only_policy(config, model) else "NOT LOCAL"),
+        CheckResult("Model tool calls", bool(tool_calls and tool_calls.ok), tool_calls.detail if tool_calls else "SKIPPED"),
         CheckResult("OpenCode installed", opencode.working, opencode.version or "MISSING", fixable=True),
-        CheckResult("OpenCode configured", opencode_config_present(), "PERMISSIONS" if opencode_config_present() else "MISSING", fixable=True),
+        CheckResult("OpenCode configured", opencode_config_present(model), "OLLAMA MODEL" if opencode_config_present(model) else "MISSING", fixable=True),
         CheckResult("Editor integration", editor.ok, editor.detail),
         CheckResult("Git repo detected", git_repo_detected(Path.cwd()), "YES" if git_repo_detected(Path.cwd()) else "NO"),
     ]
@@ -99,14 +109,25 @@ def run_fixes(model: str, manifest: Manifest) -> None:
     opencode = command_status("opencode")
 
     if not ollama.working or not opencode.working or not config_path().exists():
-        run_install(model_override=model, repair=True, yes=True, dry_run=False)
+        run_install(model_override=model, profile="auto", all_profiles=False, repair=True, yes=True, dry_run=False)
         return
 
     if not ollama_running():
         ensure_ollama_ready(table, dry_run=False)
 
     if not model_present(model):
-        pull_model(model, manifest, table, dry_run=False)
+        pull_model(model, profile_models(detect_system()), manifest, table, dry_run=False)
+        manifest.save()
+
+    tool_calls = check_structured_tool_calls(model) if model_present(model) and ollama_running() else None
+    if not opencode_config_present(model) or not editor_integration_status().ok or (tool_calls and not tool_calls.ok):
+        configure_editor_and_opencode(
+            manifest,
+            table,
+            dry_run=False,
+            model=model,
+            tool_calls=bool(tool_calls and tool_calls.ok),
+        )
         manifest.save()
 
     if table.rows:
@@ -136,7 +157,7 @@ def editor_integration_status() -> CheckResult:
 
     if command_status("code", ["--version"]).working:
         return CheckResult("Editor integration", True, "VS CODE")
-    if command_status("zed", ["--version"]).working:
+    if command_status("zed", ["--version"]).working or zed_agent_config_present():
         return CheckResult("Editor integration", True, "ZED")
     return CheckResult("Editor integration", False, "NOT DETECTED")
 
@@ -146,9 +167,10 @@ def configured_editor() -> str | None:
     editor = config.get("editor")
     if isinstance(editor, dict):
         name = editor.get("name")
-        if isinstance(name, str) and name:
+        configured = editor.get("configured")
+        if isinstance(name, str) and name in {"vscode", "zed"} and configured is True:
             return name
-    if isinstance(editor, str) and editor:
+    if isinstance(editor, str) and editor in {"vscode", "zed"}:
         return editor
     return None
 
@@ -162,10 +184,36 @@ def git_repo_detected(path: Path) -> bool:
 
 
 def lan_status(config: dict[str, object]) -> str:
+    try:
+        share_state = json_load(share_state_path())
+    except OSError:
+        share_state = {}
+    if share_is_running(share_state):
+        return "HOST"
+
     lan = config.get("lan")
-    if isinstance(lan, dict) and lan.get("enabled") is True:
-        return "ON"
+    if isinstance(lan, dict) and lan.get("connected") is True:
+        return "REMOTE"
     host = os.environ.get("OLLAMA_HOST", "")
     if host and not host.startswith(("127.0.0.1", "localhost")):
         return "ON"
     return "OFF"
+
+
+def json_load(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    try:
+        loaded = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def local_only_policy(config: dict[str, object], model: str) -> bool:
+    if not model:
+        return False
+    policy = config.get("model_policy")
+    if isinstance(policy, dict) and policy.get("local_only") is not True:
+        return False
+    return config.get("provider") == "ollama" and isinstance(config.get("model"), str)

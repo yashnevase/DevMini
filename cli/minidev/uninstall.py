@@ -7,6 +7,7 @@ from rich import box
 from rich.panel import Panel
 
 from .console import NAVY, badge, console, ok, status_table, title_panel, warn
+from .install import model_present
 from .manifest import Manifest
 from .state import manifest_path
 from .system import home_dir, run_command
@@ -15,7 +16,7 @@ PROJECT_CONTEXT_FILES = {"project.md", "environment.md", "conventions.md", "deci
 ROOT_CONTEXT_FILES = {"AGENTS.md", "memory.md"}
 GLOBAL_CONFIG_FILES = {
     ".config/opencode/opencode.json",
-    ".config/zed/agents/minidev.json",
+    ".config/zed/settings.json",
 }
 
 
@@ -46,11 +47,14 @@ def run_uninstall(dry_run: bool = False, yes: bool = False) -> None:
 
 def remove_models(manifest: Manifest, table, dry_run: bool) -> None:
     for item in manifest.data.get("models", []):
-        if not isinstance(item, dict) or item.get("action") != "pull":
+        if not isinstance(item, dict) or item.get("action") not in {"pull", "create"}:
             continue
         name = str(item.get("name"))
         provider = item.get("provider")
         if provider != "ollama" or not name:
+            continue
+        if not model_present(name):
+            table.add_row(warn(f"Skipping model {name}"), badge("MISSING", "mini.warn"))
             continue
         run_command(["ollama", "rm", name], dry_run=dry_run)
         table.add_row(ok(f"Removing model {name}"), badge("DRY RUN" if dry_run else "OK", "mini.warn" if dry_run else "mini.ok"))

@@ -27,9 +27,16 @@ Detects basic project facts and writes project context:
 - `.devmini/bugs.md`
 - `AGENTS.md`
 - `memory.md`
+- `.opencode/opencode.json`
+- `.opencode/commands/minidev-study.md`
+- `.opencode/skills/minidev-study/SKILL.md`
 
 Detected facts include package manager, likely languages, entry points, and common
 JavaScript frameworks. Existing files are skipped unless `--force` is passed.
+
+The `.opencode` files tell OpenCode to load MiniDev's project context through its
+native `instructions` config, and add a `minidev-study` command/skill for asking
+what MiniDev has learned about the project.
 
 ## `minidev learn`
 

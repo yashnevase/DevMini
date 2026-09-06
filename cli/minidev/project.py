@@ -4,6 +4,7 @@ import json
 import subprocess
 from collections import Counter
 from dataclasses import dataclass, field
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised on Python < 3.11
     import tomli as tomllib
 
 from .console import NAVY, badge, console, ok, status_table, title_panel, warn
+from .editor import MINIDEV_AGENT_PROMPT, OPENCODE_SCHEMA
 from .manifest import FileTouch, Manifest
 from .state import manifest_path
 
@@ -75,6 +77,9 @@ def run_init(force: bool = False) -> None:
         dev_dir / "bugs.md": "# Bugs\n\nNo known project-specific bugs recorded yet.\n",
         root / "AGENTS.md": render_agents_md(facts),
         root / "memory.md": render_memory_md(facts),
+        root / ".opencode" / "opencode.json": render_project_opencode_json(),
+        root / ".opencode" / "commands" / "minidev-study.md": render_minidev_study_command(),
+        root / ".opencode" / "skills" / "minidev-study" / "SKILL.md": render_minidev_study_skill(),
     }
 
     for path, content in writes.items():
@@ -294,7 +299,98 @@ def render_memory_md(facts: ProjectFacts) -> str:
     return template_text("memory.md").rstrip() + "\n\n## Project Memory\n\n- Initialized by MiniDev.\n" + f"- Detected stack: {comma_or_unknown(facts.languages)} using `{facts.package_manager}`.\n"
 
 
+def render_project_opencode_json() -> str:
+    config = {
+        "$schema": OPENCODE_SCHEMA,
+        "instructions": [
+            "AGENTS.md",
+            "memory.md",
+            ".devmini/project.md",
+            ".devmini/environment.md",
+            ".devmini/conventions.md",
+            ".devmini/decisions.md",
+            ".devmini/bugs.md",
+        ],
+        "agent": {
+            "minidev": {
+                "mode": "primary",
+                "description": "MiniDev local offline assistant",
+                "prompt": MINIDEV_AGENT_PROMPT,
+            },
+            "build": {
+                "prompt": MINIDEV_AGENT_PROMPT,
+            },
+            "plan": {
+                "prompt": MINIDEV_AGENT_PROMPT,
+            },
+        },
+        "default_agent": "minidev",
+        "command": {
+            "minidev-study": {
+                "description": "Summarize MiniDev project memory and study notes.",
+                "agent": "minidev",
+                "template": (
+                    "Read AGENTS.md, memory.md, .devmini/project.md, .devmini/environment.md, "
+                    ".devmini/conventions.md, .devmini/decisions.md, and .devmini/bugs.md. "
+                    "Summarize the current package manager, languages, commands, conventions, "
+                    "known decisions, bugs, and git-history hotspots. Do not edit files."
+                ),
+            }
+        },
+    }
+    return json.dumps(config, indent=2) + "\n"
+
+
+def render_minidev_study_command() -> str:
+    return "\n".join(
+        [
+            "---",
+            "description: Summarize MiniDev project memory and study notes",
+            "agent: minidev",
+            "---",
+            "",
+            "Read AGENTS.md, memory.md, .devmini/project.md, .devmini/environment.md, "
+            ".devmini/conventions.md, .devmini/decisions.md, and .devmini/bugs.md.",
+            "",
+            "Summarize the package manager, languages, commands, conventions, known decisions, "
+            "bugs, and git-history hotspots. Do not edit files.",
+            "",
+        ]
+    )
+
+
+def render_minidev_study_skill() -> str:
+    return "\n".join(
+        [
+            "---",
+            "name: minidev-study",
+            "description: Use when the user asks what MiniDev has learned about this project, asks for project memory, or asks for git-history study notes.",
+            "---",
+            "",
+            "# MiniDev Study",
+            "",
+            "When invoked, read the MiniDev project context files if they exist:",
+            "",
+            "- AGENTS.md",
+            "- memory.md",
+            "- .devmini/project.md",
+            "- .devmini/environment.md",
+            "- .devmini/conventions.md",
+            "- .devmini/decisions.md",
+            "- .devmini/bugs.md",
+            "",
+            "Summarize only what is present. Do not edit files unless the user explicitly asks for a code change.",
+            "",
+        ]
+    )
+
+
 def template_text(name: str) -> str:
+    try:
+        return resources.files("minidev.templates").joinpath(name).read_text()
+    except (FileNotFoundError, ModuleNotFoundError):
+        pass
+
     path = Path(__file__).resolve().parents[2] / "templates" / name
     return path.read_text()
 
